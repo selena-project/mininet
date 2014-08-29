@@ -110,7 +110,7 @@ VERSION = "2.1.0+"
 class Mininet( object ):
     "Network emulation with hosts spawned in network namespaces."
 
-    def __init__( self, topo=None, switch=OVSKernelSwitch, host=Host,
+    def __init__( self, backend, topo=None, switch=OVSKernelSwitch, host=Host,
                   controller=DefaultController, link=Link, intf=Intf,
                   build=True, xterms=False, cleanup=False, ipBase='10.0.0.0/8',
                   inNamespace=False,
@@ -160,6 +160,7 @@ class Mininet( object ):
         self.nameToNode = {}  # name to Node (Host/Switch) objects
 
         self.terms = []  # list of spawned xterm processes
+        self.backend = backend
 
         Mininet.init()  # Initialize Mininet if necessary
 
@@ -218,7 +219,7 @@ class Mininet( object ):
         defaults.update( params )
         if not cls:
             cls = self.host
-        h = cls( name, **defaults )
+        h = cls( name, self.backend, **defaults )
         self.hosts.append( h )
         self.nameToNode[ name ] = h
         return h
@@ -234,7 +235,7 @@ class Mininet( object ):
         defaults.update( params )
         if not cls:
             cls = self.switch
-        sw = cls( name, **defaults )
+        sw = cls( name, self.backend, **defaults )
         if not self.inNamespace and self.listenPort:
             self.listenPort += 1
         self.switches.append( sw )
@@ -255,7 +256,7 @@ class Mininet( object ):
             name = controller_new.name
             # pylint: enable=E1103
         else:
-            controller_new = controller( name, **params )
+            controller_new = controller( name, self.backend, **params )
         # Add new controller to net
         if controller_new: # allow controller-less setups
             self.controllers.append( controller_new )
@@ -263,7 +264,7 @@ class Mininet( object ):
         return controller_new
 
     def addNAT( self, name='nat0', connect=True, inNamespace=False, **params ):
-        nat = self.addHost( name, cls=NAT, inNamespace=inNamespace, 
+        nat = self.addHost( name, cls=NAT, inNamespace=inNamespace,
                             subnet=self.ipBase, **params )
         # find first switch and create link
         if connect:
@@ -435,7 +436,7 @@ class Mininet( object ):
     def stopXterms( self ):
         "Kill each xterm."
         for term in self.terms:
-            os.kill( term.pid, signal.SIGKILL )
+            self.backend.kill(term.pid, signal.SIGKILL)
         cleanUpScreens()
 
     def staticArp( self ):
@@ -701,7 +702,7 @@ class Mininet( object ):
           iperfArgs += '-f %s ' %format
         server.sendCmd( iperfArgs + '-s', printPid=True )
         servout = ''
-        while server.lastPid is None:
+        while server.shell.lastPid is None:
             servout += server.monitor()
         if l4Type == 'TCP':
             while 'Connected' not in client.cmd(

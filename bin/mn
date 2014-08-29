@@ -15,6 +15,7 @@ from optparse import OptionParser
 import os
 import sys
 import time
+import traceback
 
 # Fix setuptools' evil madness, and open up (more?) security holes
 if 'PYTHONPATH' in os.environ:
@@ -34,6 +35,8 @@ from mininet.topo import SingleSwitchTopo, LinearTopo, SingleSwitchReversedTopo
 from mininet.topolib import TreeTopo, TorusTopo
 from mininet.util import custom, customConstructor
 from mininet.util import buildTopo
+from mininet.mnexec import Mnexec
+# from mininet.sexec import Sexec
 
 
 # built in topologies, created only when run
@@ -109,7 +112,7 @@ def version( *_args ):
 class MininetRunner( object ):
     "Build, setup, and run Mininet."
 
-    def __init__( self ):
+    def __init__(self):
         "Init."
         self.options = None
         self.args = None  # May be used someday for more CLI scripts
@@ -195,6 +198,8 @@ class MininetRunner( object ):
                          "port")
         opts.add_option( '--pre', type='string', default=None,
                          help='CLI script to run before tests' )
+        opts.add_option( '--backend', type='string', default="mnexec",
+                         help='The backend used to implement the experiment' )
         opts.add_option( '--post', type='string', default=None,
                          help='CLI script to run after tests' )
         opts.add_option( '--pin', action='store_true',
@@ -206,6 +211,15 @@ class MininetRunner( object ):
         opts.add_option( '--version', action='callback', callback=version )
 
         self.options, self.args = opts.parse_args()
+
+        if self.options.backend == "mnexec":
+            self.backend = Mnexec()
+        elif self.options.backend == "selena":
+            print "Unsupported backend Selena"
+            sys.exit(1)
+        else:
+            print "Unsupported backend " + self.options['backend']
+            sys.exit(1)
 
         # We don't accept extra arguments after the options
         if self.args:
@@ -227,7 +241,7 @@ class MininetRunner( object ):
         "Create and run mininet."
 
         if self.options.clean:
-            cleanup()
+            cleanup(self.backend)
             exit()
 
         start = time.time()
@@ -251,7 +265,7 @@ class MininetRunner( object ):
         listenPort = None
         if not self.options.nolistenport:
             listenPort = self.options.listenport
-        mn = Net( topo=topo,
+        mn = Net( self.backend, topo=topo,
                   switch=switch, host=host, controller=controller,
                   link=link,
                   ipBase=ipBase,
@@ -302,6 +316,7 @@ if __name__ == "__main__":
         cleanup()
     except Exception:
         # Print exception
+        # traceback.print_tb(sys.exc_traceback)
         type_, val_, trace_ = sys.exc_info()
         errorMsg = ( "-"*80 + "\n" +
                      "Caught exception. Cleaning up...\n\n" +
@@ -312,4 +327,4 @@ if __name__ == "__main__":
         import traceback
         stackTrace = traceback.format_exc()
         debug( stackTrace + "\n" )
-        cleanup()
+#        cleanup()

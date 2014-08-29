@@ -187,7 +187,7 @@ def moveIntfNoRetry( intf, dstNode, srcNode=None, printError=False ):
         srcNode: source Node or None (default) for root ns
         printError: if true, print error"""
     intf = str( intf )
-    cmd = 'ip link set %s netns %s' % ( intf, dstNode.pid )
+    cmd = 'ip link set %s netns %s' % ( intf, dstNode.shell.pid )
     if srcNode:
         cmdOutput = srcNode.cmd( cmd )
     else:

@@ -73,9 +73,9 @@ class CLI( Cmd ):
             try:
                 # Make sure no nodes are still waiting
                 for node in self.mn.values():
-                    while node.waiting:
-                        node.sendInt()
-                        node.monitor()
+                    while node.shell.waiting:
+                        node.shell.sendInt()
+                        node.shell.monitor()
                 if self.isatty():
                     quietRun( 'stty echo sane intr "^C"' )
                 self.cmdloop()
@@ -133,6 +133,7 @@ class CLI( Cmd ):
 
     def do_sh( self, line ):
         "Run an external shell command"
+        print "do_sh doesn't work at this point under selena backend"
         call( line, shell=True )
 
     # do_py() and do_px() need to catch any exception during eval()/exec()
@@ -363,10 +364,10 @@ class CLI( Cmd ):
         "Wait for a node to finish, and print its output."
         # Pollers
         nodePoller = poll()
-        nodePoller.register( node.stdout )
+        nodePoller.register( node.shell.stdout )
         bothPoller = poll()
         bothPoller.register( self.stdin, POLLIN )
-        bothPoller.register( node.stdout, POLLIN )
+        bothPoller.register( node.shell.stdout, POLLIN )
         if self.isatty():
             # Buffer by character, so that interactive
             # commands sort of work
@@ -387,7 +388,7 @@ class CLI( Cmd ):
                 if isReadable( nodePoller ):
                     data = node.monitor()
                     output( data )
-                if not node.waiting:
+                if not node.shell.waiting:
                     break
             except KeyboardInterrupt:
                 # There is an at least one race condition here, since

@@ -49,14 +49,11 @@ Future enhancements:
 - Create proxy objects for remote nodes (Mininet: Cluster Edition)
 """
 
-import os
-import pty
-import re
 import signal
-import select
 from subprocess import Popen, PIPE, STDOUT
 from operator import or_
 from time import sleep
+import re
 
 from mininet.log import info, error, warn, debug
 from mininet.util import ( quietRun, errRun, errFail, moveIntf, isShellBuiltin,
@@ -72,7 +69,7 @@ class Node( object ):
 
     portBase = 0  # Nodes always start with eth0/port0, even in OF 1.0
 
-    def __init__( self, name, inNamespace=True, **params ):
+    def __init__( self, name, backend, inNamespace=True, **params ):
         """name: name of node
            inNamespace: in network namespace?
            params: Node parameters (see config() for details)"""
@@ -92,14 +89,11 @@ class Node( object ):
         self.nameToIntf = {}  # dict of interface names to Intfs
 
         # Make pylint happy
-        ( self.shell, self.execed, self.pid, self.stdin, self.stdout,
-            self.lastPid, self.lastCmd, self.pollOut ) = (
-                None, None, None, None, None, None, None, None )
-        self.waiting = False
-        self.readbuf = ''
+        ( self.shell, self.execed ) = (
+                None, None )
 
         # Start command interpreter shell
-        self.startShell()
+        self.startShell(backend)
 
     # File descriptor to node mapping support
     # Class variables and methods
@@ -117,49 +111,16 @@ class Node( object ):
 
     # Command support via shell process in namespace
 
-    def startShell( self ):
+    def startShell( self, backend ):
         "Start a shell process for running commands"
         if self.shell:
             error( "%s: shell is already running" )
             return
-        # mnexec: (c)lose descriptors, (d)etach from tty,
-        # (p)rint pid, and run in (n)amespace
-        opts = '-cd'
-        if self.inNamespace:
-            opts += 'n'
-        # bash -m: enable job control, i: force interactive
-        # -s: pass $* to shell, and make process easy to find in ps
-        # prompt is set to sentinel chr( 127 )
-        os.environ[ 'PS1' ] = chr( 127 )
-        cmd = [ 'mnexec', opts, 'bash', '--norc', '-mis', 'mininet:' + self.name ]
-        # Spawn a shell subprocess in a pseudo-tty, to disable buffering
-        # in the subprocess and insulate it from signals (e.g. SIGINT)
-        # received by the parent
-        master, slave = pty.openpty()
-        self.shell = Popen( cmd, stdin=slave, stdout=slave, stderr=slave,
-                                  close_fds=False )
-        self.stdin = os.fdopen( master )
-        self.stdout = self.stdin
-        self.pid = self.shell.pid
-        self.pollOut = select.poll()
-        self.pollOut.register( self.stdout )
-        # Maintain mapping between file descriptors and nodes
-        # This is useful for monitoring multiple nodes
-        # using select.poll()
-        self.outToNode[ self.stdout.fileno() ] = self
-        self.inToNode[ self.stdin.fileno() ] = self
+        self.shell = backend.startShell(self.inNamespace, self.name)
         self.execed = False
-        self.lastCmd = None
-        self.lastPid = None
-        self.readbuf = ''
-        # Wait for prompt
-        while True:
-            data = self.read( 1024 )
-            if data[ -1 ] == chr( 127 ):
-                break
-            self.pollOut.poll()
-        self.waiting = False
-        self.cmd( 'stty -echo' )
+        self.outToNode[ self.shell.stdout.fileno() ] = self
+        self.inToNode[ self.shell.stdin.fileno() ] = self
+
 
     def cleanup( self ):
         "Help python collect its garbage."
@@ -172,40 +133,18 @@ class Node( object ):
     # Subshell I/O, commands and control
 
     def read( self, maxbytes=1024 ):
-        """Buffered read from node, non-blocking.
-           maxbytes: maximum number of bytes to return"""
-        count = len( self.readbuf )
-        if count < maxbytes:
-            data = os.read( self.stdout.fileno(), maxbytes - count )
-            self.readbuf += data
-        if maxbytes >= len( self.readbuf ):
-            result = self.readbuf
-            self.readbuf = ''
-        else:
-            result = self.readbuf[ :maxbytes ]
-            self.readbuf = self.readbuf[ maxbytes: ]
-        return result
+        return self.shell.read(maxbytes)
 
     def readline( self ):
-        """Buffered readline from node, non-blocking.
-           returns: line (minus newline) or None"""
-        self.readbuf += self.read( 1024 )
-        if '\n' not in self.readbuf:
-            return None
-        pos = self.readbuf.find( '\n' )
-        line = self.readbuf[ 0: pos ]
-        self.readbuf = self.readbuf[ pos + 1: ]
-        return line
+        return self.shell.readline()
 
     def write( self, data ):
-        """Write data to node.
-           data: string"""
-        os.write( self.stdin.fileno(), data )
+        self.shell.write(data)
 
     def terminate( self ):
         "Send kill signal to Node and clean up after it."
         if self.shell:
-            os.killpg( self.pid, signal.SIGHUP )
+            self.shell.terminate()
         self.cleanup()
 
     def stop( self ):
@@ -213,83 +152,20 @@ class Node( object ):
         self.terminate()
 
     def waitReadable( self, timeoutms=None ):
-        """Wait until node's output is readable.
-           timeoutms: timeout in ms or None to wait indefinitely."""
-        if len( self.readbuf ) == 0:
-            self.pollOut.poll( timeoutms )
+        self.shell.waitReadable(timeoutms)
 
     def sendCmd( self, *args, **kwargs ):
-        """Send a command, followed by a command to echo a sentinel,
-           and return without waiting for the command to complete.
-           args: command and arguments, or string
-           printPid: print command's PID?"""
-        assert not self.waiting
-        printPid = kwargs.get( 'printPid', True )
-        # Allow sendCmd( [ list ] )
-        if len( args ) == 1 and type( args[ 0 ] ) is list:
-            cmd = args[ 0 ]
-        # Allow sendCmd( cmd, arg1, arg2... )
-        elif len( args ) > 0:
-            cmd = args
-        # Convert to string
-        if not isinstance( cmd, str ):
-            cmd = ' '.join( [ str( c ) for c in cmd ] )
-        if not re.search( r'\w', cmd ):
-            # Replace empty commands with something harmless
-            cmd = 'echo -n'
-        self.lastCmd = cmd
-        if printPid and not isShellBuiltin( cmd ):
-            if len( cmd ) > 0 and cmd[ -1 ] == '&':
-                # print ^A{pid}\n so monitor() can set lastPid
-                cmd += ' printf "\\001%d\n" $! \n'
-            else:
-                cmd = 'mnexec -p ' + cmd
-        self.write( cmd + '\n' )
-        self.lastPid = None
-        self.waiting = True
+        self.shell.execProcess(*args, **kwargs)
 
     def sendInt( self, intr=chr( 3 ) ):
         "Interrupt running command."
-        self.write( intr )
+        self.shell.write( intr )
 
     def monitor( self, timeoutms=None, findPid=True ):
-        """Monitor and return the output of a command.
-           Set self.waiting to False if command has completed.
-           timeoutms: timeout in ms or None to wait indefinitely."""
-        self.waitReadable( timeoutms )
-        data = self.read( 1024 )
-        # Look for PID
-        marker = chr( 1 ) + r'\d+\r\n'
-        if findPid and chr( 1 ) in data:
-            # Marker can be read in chunks; continue until all of it is read
-            while not re.findall( marker, data ):
-                data += self.read( 1024 )
-            markers = re.findall( marker, data )
-            if markers:
-                self.lastPid = int( markers[ 0 ][ 1: ] )
-                data = re.sub( marker, '', data )
-        # Look for sentinel/EOF
-        if len( data ) > 0 and data[ -1 ] == chr( 127 ):
-            self.waiting = False
-            data = data[ :-1 ]
-        elif chr( 127 ) in data:
-            self.waiting = False
-            data = data.replace( chr( 127 ), '' )
-        return data
+        return self.shell.monitor(timeoutms, findPid)
 
     def waitOutput( self, verbose=False ):
-        """Wait for a command to complete.
-           Completion is signaled by a sentinel character, ASCII(127)
-           appearing in the output stream.  Wait for the sentinel and return
-           the output, including trailing newline.
-           verbose: print output interactively"""
-        log = info if verbose else debug
-        output = ''
-        while self.waiting:
-            data = self.monitor()
-            output += data
-            log( data )
-        return output
+        return self.shell.waitOutput(verbose)
 
     def cmd( self, *args, **kwargs ):
         """Send a command, wait for output, and return it.
@@ -311,7 +187,7 @@ class Node( object ):
            kwargs: Popen() keyword args"""
         defaults = { 'stdout': PIPE, 'stderr': PIPE,
                      'mncmd':
-                     [ 'mnexec', '-da', str( self.pid ) ] }
+                     [ 'mnexec', '-da', str( self.shell.pid ) ] }
         defaults.update( kwargs )
         if len( args ) == 1:
             if type( args[ 0 ] ) is list:
@@ -550,7 +426,7 @@ class Node( object ):
         intfs = ( ','.join( [ '%s:%s' % ( i.name, i.IP() )
                               for i in self.intfList() ] ) )
         return '<%s %s: %s pid=%s> ' % (
-            self.__class__.__name__, self.name, intfs, self.pid )
+            self.__class__.__name__, self.name, intfs, self.shell.pid )
 
     def __str__( self ):
         "Abbreviated string representation"
@@ -594,7 +470,7 @@ class CPULimitedHost( Host ):
         errFail( 'cgcreate -g ' + self.cgroup )
         # We don't add ourselves to a cpuset because you must
         # specify the cpu and memory placement first
-        errFail( 'cgclassify -g cpu,cpuacct:/%s %s' % ( self.name, self.pid ) )
+        errFail( 'cgclassify -g cpu,cpuacct:/%s %s' % ( self.name, self.shell.pid ) )
         # BL: Setting the correct period/quota is tricky, particularly
         # for RT. RT allows very small quotas, but the overhead
         # seems to be high. CFS has a mininimum quota of 1 ms, but
@@ -631,7 +507,7 @@ class CPULimitedHost( Host ):
            args: Popen() args, single list, or string
            kwargs: Popen() keyword args"""
         # Tell mnexec to execute command in our cgroup
-        mncmd = [ 'mnexec', '-da', str( self.pid ),
+        mncmd = [ 'mnexec', '-da', str( self.shell.pid ),
                   '-g', self.name ]
         if self.sched == 'rt':
             mncmd += [ '-r', str( self.rtprio ) ]
@@ -645,7 +521,7 @@ class CPULimitedHost( Host ):
     def chrt( self ):
         "Set RT scheduling priority"
         quietRun( 'chrt -p %s %s' % ( self.rtprio, self.pid ) )
-        result = quietRun( 'chrt -p %s' % self.pid )
+        result = quietRun( 'chrt -p %s' % self.self.pid )
         firstline = result.split( '\n' )[ 0 ]
         lastword = firstline.split( ' ' )[ -1 ]
         if lastword != 'SCHED_RR':
@@ -719,7 +595,7 @@ class CPULimitedHost( Host ):
         # We have to do this here after we've specified
         # cpus and mems
         errFail( 'cgclassify -g cpuset:/%s %s' % (
-                 self.name, self.pid ) )
+                 self.name, self.shell.pid ) )
 
     def config( self, cpu=None, cores=None, **params ):
         """cpu: desired overall system CPU fraction
@@ -755,7 +631,7 @@ class HostWithPrivateDirs( Host ):
         for directory in self.privateDirs:
             if isinstance( directory, tuple ):
                 # mount given private directory
-                privateDir = directory[ 1 ] % self.__dict__ 
+                privateDir = directory[ 1 ] % self.__dict__
                 mountPoint = directory[ 0 ]
                 self.cmd( 'mkdir -p %s' % privateDir )
                 self.cmd( 'mkdir -p %s' % mountPoint )
@@ -763,7 +639,7 @@ class HostWithPrivateDirs( Host ):
                                ( privateDir, mountPoint ) )
             else:
                 # mount temporary filesystem on directory
-                self.cmd( 'mkdir -p %s' % directory ) 
+                self.cmd( 'mkdir -p %s' % directory )
                 self.cmd( 'mount -n -t tmpfs tmpfs %s' % directory )
 
 
@@ -795,11 +671,11 @@ class Switch( Node ):
     portBase = 1  # Switches start with port 1 in OpenFlow
     dpidLen = 16  # digits in dpid passed to switch
 
-    def __init__( self, name, dpid=None, opts='', listenPort=None, **params):
+    def __init__( self, name, backend, dpid=None, opts='', listenPort=None, **params):
         """dpid: dpid hex string (or None to derive from name, e.g. s1 -> 1)
            opts: additional switch options
            listenPort: port to listen on for dpctl connections"""
-        Node.__init__( self, name, **params )
+        Node.__init__( self, name, backend, **params )
         self.dpid = self.defaultDpid( dpid )
         self.opts = opts
         self.listenPort = listenPort
@@ -849,7 +725,7 @@ class Switch( Node ):
         intfs = ( ','.join( [ '%s:%s' % ( i.name, i.IP() )
                               for i in self.intfList() ] ) )
         return '<%s %s: %s pid=%s> ' % (
-            self.__class__.__name__, self.name, intfs, self.pid )
+            self.__class__.__name__, self.name, intfs, self.shell.pid )
 
 class UserSwitch( Switch ):
     "User-space switch."
@@ -1002,14 +878,14 @@ class OVSLegacyKernelSwitch( Switch ):
 class OVSSwitch( Switch ):
     "Open vSwitch switch. Depends on ovs-vsctl."
 
-    def __init__( self, name, failMode='secure', datapath='kernel',
+    def __init__( self, name, backend, failMode='secure', datapath='kernel',
                  inband=False, protocols=None, **params ):
         """Init.
            name: name for switch
            failMode: controller loss behavior (secure|open)
            datapath: userspace or kernel mode (kernel|user)
            inband: use in-band control (False)"""
-        Switch.__init__( self, name, **params )
+        Switch.__init__( self, name, backend, **params )
         self.failMode = failMode
         self.datapath = datapath
         self.inband = inband
@@ -1225,7 +1101,7 @@ class Controller( Node ):
     """A Controller is a Node that is running (or has execed?) an
        OpenFlow controller."""
 
-    def __init__( self, name, inNamespace=False, command='controller',
+    def __init__( self, name, backend, inNamespace=False, command='controller',
                   cargs='-v ptcp:%d', cdir=None, ip="127.0.0.1",
                   port=6633, protocol='tcp', **params ):
         self.command = command
@@ -1234,7 +1110,7 @@ class Controller( Node ):
         self.ip = ip
         self.port = port
         self.protocol = protocol
-        Node.__init__( self, name, inNamespace=inNamespace,
+        Node.__init__( self, name, backend, inNamespace=inNamespace,
                        ip=ip, **params  )
         self.checkListening()
 
@@ -1284,7 +1160,7 @@ class Controller( Node ):
         "More informative string representation"
         return '<%s %s: %s:%s pid=%s> ' % (
             self.__class__.__name__, self.name,
-            self.IP(), self.port, self.pid )
+            self.IP(), self.port, self.shell.pid )
     @classmethod
     def isAvailable( self ):
         return quietRun( 'which controller' )
@@ -1353,8 +1229,8 @@ class RemoteController( Controller ):
             warn( "Unable to contact the remote controller"
                   " at %s:%d\n" % ( self.ip, self.port ) )
 
-def DefaultController( name, order=[ Controller, OVSController ], **kwargs ):
+def DefaultController( name, backend, order=[ Controller, OVSController ], **kwargs ):
     "find any controller that is available and run it"
     for controller in order:
         if controller.isAvailable():
-            return controller( name, **kwargs )
+            return controller( name, backend, **kwargs )
