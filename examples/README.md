@@ -56,6 +56,11 @@ This example shows how to use link and CPU limits.
 This example shows how to create a custom topology programatically
 by subclassing Topo, and how to run a series of tests on it.
 
+### linuxrouter.py:
+
+This example shows how to create and configure a router in Mininet
+that uses Linux IP forwarding.
+
 #### miniedit.py:
 
 This example demonstrates creating a network via a graphical editor.
@@ -78,6 +83,11 @@ This example creates a network and runs multiple tests on it.
 This example shows how to connect a Mininet network to the Internet
 using NAT. It also answers the eternal question "why can't I ping
 `google.com`?"
+
+#### numberedports.py
+
+This example verifies the mininet ofport numbers match up to the ovs port numbers.
+It also verifies that the port numbers match up to the interface numbers
 
 #### popen.py:
 
@@ -118,7 +128,7 @@ memory and `sysctl` configuration (see `INSTALL`.)
 This example creates a 64-host tree network, and attempts to check full
 connectivity using `ping`, for different switch/datapath types.
 
-#### numberedports.py
+#### vlanhost.py:
 
-This example verifies the mininet ofport numbers match up to the ovs port numbers.
-It also verifies that the port numbers match up to the interface numbers
+An example of how to subclass Host to use a VLAN on its primary interface.
+
